@@ -30,7 +30,7 @@ device = (
 # -----------------------------
 # Mixup + CutMix
 # -----------------------------
-def mixup_cutmix(x, y, alpha=1.0):
+def mixup_cutmix(x, y, alpha=0.2):
     if random.random() < 0.5:
         # Mixup
         lam = np.random.beta(alpha, alpha)
@@ -156,7 +156,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
     total_loss, correct, total = 0, 0, 0
 
     # Freeze first 5 epochs
-    freeze = epoch < 5
+    freeze = epoch < 1
 
     for name, param in model.named_parameters():
         if "features" in name:
