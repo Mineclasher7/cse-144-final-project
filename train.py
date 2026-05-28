@@ -89,14 +89,20 @@ def get_dataloaders(train_dir, test_dir, batch_size=64, num_workers=2):
     ])
 
     full_dataset = datasets.ImageFolder(root=train_dir)
+    class_to_idx = full_dataset.class_to_idx
+
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
 
     g = torch.Generator().manual_seed(42)
     train_idx, val_idx = random_split(range(len(full_dataset)), [train_size, val_size], generator=g)
 
+
     train_set = Subset(datasets.ImageFolder(train_dir, transform=train_tf), train_idx.indices)
-    val_set   = Subset(datasets.ImageFolder(train_dir, transform=val_tf), val_idx.indices)
+    train_set.dataset.class_to_idx = class_to_idx
+
+    val_set = Subset(datasets.ImageFolder(train_dir, transform=val_tf), val_idx.indices)
+    val_set.dataset.class_to_idx = class_to_idx
 
     class TestDataset(Dataset):
         def __init__(self, root, transform=None):
@@ -118,7 +124,7 @@ def get_dataloaders(train_dir, test_dir, batch_size=64, num_workers=2):
     val_loader   = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
     test_loader  = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    return train_loader, val_loader, test_loader, full_dataset.class_to_idx
+    return train_loader, val_loader, test_loader, class_to_idx
 
 # -----------------------------
 # Model + EMA
