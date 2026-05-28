@@ -13,7 +13,7 @@ device = (
 )
 
 # -----------------------------
-# Dataset
+# Dataset (FIXED)
 # -----------------------------
 class TestDataset(torch.utils.data.Dataset):
     def __init__(self, root, transform=None):
@@ -30,6 +30,10 @@ class TestDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img_path = os.path.join(self.root, self.files[idx])
         image = Image.open(img_path).convert("RGB")
+
+        if self.transform:
+            image = self.transform(image)
+
         return image, self.files[idx]
 
 # -----------------------------
@@ -54,7 +58,6 @@ def load_model(num_classes, ckpt_path):
 def predict(model, dataset, batch_size=32):
     results = []
 
-    # Base transforms
     base_tf = transforms.Compose([
         transforms.Resize(236),
         transforms.CenterCrop(224),
@@ -62,7 +65,6 @@ def predict(model, dataset, batch_size=32):
         transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
     ])
 
-    # 5‑crop TTA
     crop_tf = transforms.Compose([
         transforms.Resize(256),
         transforms.FiveCrop(224)
@@ -73,17 +75,12 @@ def predict(model, dataset, batch_size=32):
     for img, filename in tqdm(loader, desc="Predicting"):
         img = img[0]  # remove batch dimension
 
-        # ----- TTA 1: Center crop -----
         x1 = base_tf(img).unsqueeze(0).to(device)
 
-        # ----- TTA 2: Horizontal flip -----
         x2 = torch.flip(x1, dims=[3])
 
-        # ----- TTA 3–7: FiveCrop -----
-        crops = crop_tf(img)  # tuple of 5 PIL images
-        crops = torch.stack([
-            transforms.ToTensor()(c) for c in crops
-        ])
+        crops = crop_tf(img)  
+        crops = torch.stack([transforms.ToTensor()(c) for c in crops])
         crops = transforms.Normalize(
             [0.485,0.456,0.406],
             [0.229,0.224,0.225]
@@ -94,7 +91,7 @@ def predict(model, dataset, batch_size=32):
         logits = []
         logits.append(model(x1))
         logits.append(model(x2))
-        logits.append(model(crops))  # shape: (5,100)
+        logits.append(model(crops))  
 
         # ----- Average softmax -----
         probs = torch.cat([
@@ -103,7 +100,7 @@ def predict(model, dataset, batch_size=32):
             F.softmax(logits[2], dim=1)
         ], dim=0)
 
-        probs = probs.mean(dim=0)  # average across 7 predictions
+        probs = probs.mean(dim=0)
         pred = probs.argmax().item()
 
         results.append((filename[0], pred))
@@ -118,7 +115,15 @@ def main():
     ckpt_path = "checkpoint.pt"
     submission_path = "/content/sample_submission.csv"
 
-    dataset = TestDataset(test_dir)
+    base_dataset_tf = transforms.Compose([
+        transforms.Resize(236),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
+    ])
+
+    dataset = TestDataset(test_dir, transform=base_dataset_tf)
+
     model, class_to_idx = load_model(num_classes=100, ckpt_path=ckpt_path)
     idx_to_class = {v: k for k, v in class_to_idx.items()}
 
