@@ -19,18 +19,21 @@ class TestDataset(torch.utils.data.Dataset):
     def __init__(self, root, transform=None):
         self.root = root
         self.transform = transform
-        self.files = sorted([f for f in os.listdir(root) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+        self.files = sorted([
+            f for f in os.listdir(root)
+            if f.lower().endswith((".png", ".jpg", ".jpeg"))
+        ])
+
     def __len__(self):
         return len(self.files)
+
     def __getitem__(self, idx):
         img_path = os.path.join(self.root, self.files[idx])
         image = Image.open(img_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
         return image, self.files[idx]
 
 # -----------------------------
-# Model
+# Model Loader (EMA‑compatible)
 # -----------------------------
 def load_model(num_classes, ckpt_path):
     model = models.convnext_tiny(weights=None)
@@ -45,25 +48,65 @@ def load_model(num_classes, ckpt_path):
     return model, checkpoint["class_to_idx"]
 
 # -----------------------------
-# Inference
+# TTA Inference
 # -----------------------------
 @torch.no_grad()
-def predict(model, loader, num_augs=2):
+def predict(model, dataset, batch_size=32):
     results = []
 
-    for x, filenames in tqdm(loader, desc="Predicting"):
-        x = x.to(device)
+    # Base transforms
+    base_tf = transforms.Compose([
+        transforms.Resize(236),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
+    ])
 
-        probs = F.softmax(model(x), dim=1)
+    # 5‑crop TTA
+    crop_tf = transforms.Compose([
+        transforms.Resize(256),
+        transforms.FiveCrop(224)
+    ])
 
-        if num_augs > 1:
-            x_flip = torch.flip(x, dims=[3])
-            probs += F.softmax(model(x_flip), dim=1)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
 
-        probs /= num_augs
-        preds = probs.argmax(dim=1)
+    for img, filename in tqdm(loader, desc="Predicting"):
+        img = img[0]  # remove batch dimension
 
-        results.extend(zip(filenames, preds.cpu().numpy()))
+        # ----- TTA 1: Center crop -----
+        x1 = base_tf(img).unsqueeze(0).to(device)
+
+        # ----- TTA 2: Horizontal flip -----
+        x2 = torch.flip(x1, dims=[3])
+
+        # ----- TTA 3–7: FiveCrop -----
+        crops = crop_tf(img)  # tuple of 5 PIL images
+        crops = torch.stack([
+            transforms.ToTensor()(c) for c in crops
+        ])
+        crops = transforms.Normalize(
+            [0.485,0.456,0.406],
+            [0.229,0.224,0.225]
+        )(crops)
+        crops = crops.to(device)
+
+        # ----- Run model -----
+        logits = []
+        logits.append(model(x1))
+        logits.append(model(x2))
+        logits.append(model(crops))  # shape: (5,100)
+
+        # ----- Average softmax -----
+        probs = torch.cat([
+            F.softmax(logits[0], dim=1),
+            F.softmax(logits[1], dim=1),
+            F.softmax(logits[2], dim=1)
+        ], dim=0)
+
+        probs = probs.mean(dim=0)  # average across 7 predictions
+        pred = probs.argmax().item()
+
+        results.append((filename[0], pred))
 
     return results
 
@@ -75,20 +118,11 @@ def main():
     ckpt_path = "checkpoint.pt"
     submission_path = "/content/sample_submission.csv"
 
-    tf = transforms.Compose([
-        transforms.Resize(236),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])
-    ])
-
-    test_set = TestDataset(test_dir, transform=tf)
-    test_loader = torch.utils.data.DataLoader(test_set, batch_size=64, shuffle=False)
-
+    dataset = TestDataset(test_dir)
     model, class_to_idx = load_model(num_classes=100, ckpt_path=ckpt_path)
     idx_to_class = {v: k for k, v in class_to_idx.items()}
 
-    results = predict(model, test_loader)
+    results = predict(model, dataset)
 
     df = pd.read_csv(submission_path)
     pred_map = {fname: idx_to_class[pred] for fname, pred in results}
