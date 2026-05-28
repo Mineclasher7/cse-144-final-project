@@ -206,7 +206,7 @@ def main():
     train_dir = "/content/drive/MyDrive/train"
     test_dir  = "/content/drive/MyDrive/test"
 
-    epochs = 50
+    epochs = 80
     batch_size = 64
 
     train_loader, val_loader, test_loader, class_to_idx = get_dataloaders(
