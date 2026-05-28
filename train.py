@@ -27,18 +27,21 @@ device = (
     else torch.device("cpu")
 )
 
+USE_CUDA = torch.cuda.is_available()
+AUTOCAST_DEVICE = 'cuda' if USE_CUDA else 'cpu'
+
+print(f"Using device: {device} | autocast: {AUTOCAST_DEVICE}")
+
 # -----------------------------
 # Mixup + CutMix
 # -----------------------------
 def mixup_cutmix(x, y, alpha=0.2):
     if random.random() < 0.5:
-        # Mixup
         lam = np.random.beta(alpha, alpha)
         index = torch.randperm(x.size(0)).to(x.device)
         mixed_x = lam * x + (1 - lam) * x[index]
         return mixed_x, y, y[index], lam
     else:
-        # CutMix
         lam = np.random.beta(alpha, alpha)
         index = torch.randperm(x.size(0)).to(x.device)
         bbx1, bby1, bbx2, bby2 = rand_bbox(x.size(), lam)
@@ -97,7 +100,6 @@ def get_dataloaders(train_dir, test_dir, batch_size=64, num_workers=2):
     g = torch.Generator().manual_seed(42)
     train_idx, val_idx = random_split(range(len(full_dataset)), [train_size, val_size], generator=g)
 
-
     train_set = Subset(datasets.ImageFolder(train_dir, transform=train_tf), train_idx.indices)
     train_set.dataset.class_to_idx = class_to_idx
 
@@ -120,9 +122,9 @@ def get_dataloaders(train_dir, test_dir, batch_size=64, num_workers=2):
 
     test_set = TestDataset(test_dir, transform=val_tf)
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader   = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
-    test_loader  = DataLoader(test_set, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=USE_CUDA)
+    val_loader   = DataLoader(val_set,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=USE_CUDA)
+    test_loader  = DataLoader(test_set,  batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=USE_CUDA)
 
     return train_loader, val_loader, test_loader, class_to_idx
 
@@ -130,14 +132,21 @@ def get_dataloaders(train_dir, test_dir, batch_size=64, num_workers=2):
 # Model + EMA
 # -----------------------------
 class EMA:
-    def __init__(self, model, decay=0.999):
+    def __init__(self, model, decay=0.995):
         self.shadow = copy.deepcopy(model).eval()
         self.decay = decay
+        for p in self.shadow.parameters():
+            p.requires_grad_(False)
 
     def update(self, model):
         with torch.no_grad():
             for ema_p, p in zip(self.shadow.parameters(), model.parameters()):
                 ema_p.data.mul_(self.decay).add_(p.data, alpha=1 - self.decay)
+
+    def update_buffers(self, model):
+        with torch.no_grad():
+            for ema_buf, buf in zip(self.shadow.buffers(), model.buffers()):
+                ema_buf.data.copy_(buf.data)
 
 def build_model(num_classes=100):
     weights = models.ConvNeXt_Tiny_Weights.DEFAULT
@@ -155,9 +164,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
     model.train()
     total_loss, correct, total = 0, 0, 0
 
-    # Freeze first 5 epochs
     freeze = epoch < 1
-
     for name, param in model.named_parameters():
         if "features" in name:
             param.requires_grad = not freeze
@@ -168,7 +175,8 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
 
         mixed_x, y_a, y_b, lam = mixup_cutmix(x, y)
 
-        with torch.amp.autocast('cuda'):
+        # FIX #2: Use correct device for autocast; enabled=False on CPU avoids issues
+        with torch.amp.autocast(AUTOCAST_DEVICE, enabled=USE_CUDA):
             y_pred = model(mixed_x)
             loss = lam * criterion(y_pred, y_a) + (1 - lam) * criterion(y_pred, y_b)
 
@@ -178,11 +186,13 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
         scheduler.step()
 
         ema.update(model)
+        ema.update_buffers(model)
 
         total_loss += loss.item() * x.size(0)
 
         with torch.no_grad():
-            clean_preds = model(x).argmax(dim=1)
+            with torch.amp.autocast(AUTOCAST_DEVICE, enabled=USE_CUDA):
+                clean_preds = model(x).argmax(dim=1)
             correct += (clean_preds == y).sum().item()
 
         total += y.size(0)
@@ -196,14 +206,16 @@ def evaluate(model, loader, criterion):
 
     for x, y in tqdm(loader, desc="Validation"):
         x, y = x.to(device), y.to(device)
-        y_pred = model(x)
-        loss = criterion(y_pred, y)
 
-        total_loss += loss.item()
+        with torch.amp.autocast(AUTOCAST_DEVICE, enabled=USE_CUDA):
+            y_pred = model(x)
+            loss = criterion(y_pred, y)
+
+        total_loss += loss.item() * x.size(0)
         correct += (y_pred.argmax(dim=1) == y).sum().item()
         total += y.size(0)
 
-    return total_loss / len(loader), correct / total
+    return total_loss / total, correct / total
 
 # -----------------------------
 # Main
@@ -220,12 +232,13 @@ def main():
     )
 
     model = build_model(num_classes=100)
-    ema = EMA(model)
+
+    ema = EMA(model, decay=0.995)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.15)
     optimizer = torch.optim.AdamW([
-        {'params': model.features.parameters(), 'lr': 1e-4},
-        {'params': model.classifier.parameters(), 'lr': 1e-3}
+        {'params': model.features.parameters(),    'lr': 1e-4},
+        {'params': model.classifier.parameters(),  'lr': 1e-3}
     ], weight_decay=0.1)
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -235,17 +248,20 @@ def main():
         epochs=epochs
     )
 
-    scaler = torch.amp.GradScaler('cuda')
+    scaler = torch.amp.GradScaler(AUTOCAST_DEVICE, enabled=USE_CUDA)
 
     best_acc = 0
     ckpt_path = "checkpoint.pt"
 
     for epoch in range(epochs):
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, scheduler, criterion, scaler, ema, epoch)
+        train_loss, train_acc = train_one_epoch(
+            model, train_loader, optimizer, scheduler, criterion, scaler, ema, epoch
+        )
         val_loss, val_acc = evaluate(ema.shadow, val_loader, criterion)
 
         print(f"Epoch {epoch+1}/{epochs} | "
-              f"Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}")
+              f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
+              f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
 
         if val_acc > best_acc:
             best_acc = val_acc
@@ -253,6 +269,7 @@ def main():
                 "model_state_dict": ema.shadow.state_dict(),
                 "class_to_idx": class_to_idx
             }, ckpt_path)
+            print(f"  -> Saved checkpoint (best val acc: {best_acc:.4f})")
 
     print("Training complete. Best Val Acc:", best_acc)
 
