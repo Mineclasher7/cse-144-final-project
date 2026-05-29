@@ -3,10 +3,9 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms, models
 from tqdm.auto import tqdm
-from PIL import Image
 import copy
 
 # -----------------------------
@@ -61,9 +60,9 @@ def rand_bbox(size, lam):
     return bbx1, bby1, bbx2, bby2
 
 # -----------------------------
-# Dataset — full 1000 images, no val split
+# Dataset
 # -----------------------------
-def get_full_train_loader(train_dir, batch_size=32, num_workers=2):
+def get_train_loader(train_dir, batch_size=32, num_workers=2):
     mean = [0.485, 0.456, 0.406]
     std  = [0.229, 0.224, 0.225]
 
@@ -78,11 +77,11 @@ def get_full_train_loader(train_dir, batch_size=32, num_workers=2):
         transforms.RandomErasing(p=0.4, scale=(0.02, 0.2)),
     ])
 
-    full_dataset = datasets.ImageFolder(root=train_dir, transform=train_tf)
-    class_to_idx = full_dataset.class_to_idx
-    print(f"Training on {len(full_dataset)} images across {len(class_to_idx)} classes")
+    dataset      = datasets.ImageFolder(root=train_dir, transform=train_tf)
+    class_to_idx = dataset.class_to_idx
+    print(f"Training on {len(dataset)} images across {len(class_to_idx)} classes")
 
-    loader = DataLoader(full_dataset, batch_size=batch_size, shuffle=True,
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
                         num_workers=num_workers, pin_memory=USE_CUDA)
     return loader, class_to_idx
 
@@ -107,27 +106,9 @@ class EMA:
                 ema_buf.data.copy_(buf.data)
 
 # -----------------------------
-# Models
+# Model — Swin-T
 # -----------------------------
-def build_convnext(num_classes, dropout=0.4):
-    model   = models.convnext_tiny(weights=models.ConvNeXt_Tiny_Weights.DEFAULT)
-    in_feat = model.classifier[2].in_features
-    model.classifier[2] = nn.Sequential(
-        nn.Dropout(p=dropout),
-        nn.Linear(in_feat, num_classes)
-    )
-    return model.to(device)
-
-def build_efficientnet(num_classes, dropout=0.4):
-    model   = models.efficientnet_v2_s(weights=models.EfficientNet_V2_S_Weights.DEFAULT)
-    in_feat = model.classifier[1].in_features
-    model.classifier = nn.Sequential(
-        nn.Dropout(p=dropout),
-        nn.Linear(in_feat, num_classes)
-    )
-    return model.to(device)
-
-def build_swin(num_classes, dropout=0.4):
+def build_model(num_classes, dropout=0.4):
     model   = models.swin_t(weights=models.Swin_T_Weights.DEFAULT)
     in_feat = model.head.in_features
     model.head = nn.Sequential(
@@ -141,19 +122,6 @@ def set_stochastic_depth(model, drop_prob=0.2):
         if hasattr(module, 'drop_path') and hasattr(module.drop_path, 'p'):
             module.drop_path.p = drop_prob
 
-def freeze_backbone(model, freeze=True):
-    attr = 'features' if hasattr(model, 'features') else 'layers'
-    for param in getattr(model, attr).parameters():
-        param.requires_grad = not freeze
-
-def get_backbone_params(model):
-    attr = 'features' if hasattr(model, 'features') else 'layers'
-    return getattr(model, attr).parameters()
-
-def get_head_params(model):
-    attr = 'classifier' if hasattr(model, 'classifier') else 'head'
-    return getattr(model, attr).parameters()
-
 # -----------------------------
 # Training
 # -----------------------------
@@ -161,7 +129,9 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
     model.train()
     total_loss, correct, total = 0, 0, 0
 
-    freeze_backbone(model, freeze=(epoch < 2))
+    freeze = epoch < 2
+    for param in model.layers.parameters():
+        param.requires_grad = not freeze
 
     for x, y in tqdm(loader, desc=f"  Epoch {epoch+1}", leave=False):
         x, y = x.to(device), y.to(device)
@@ -191,40 +161,6 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
 
     return total_loss / total, correct / total
 
-def train_model(name, model, loader, epochs, ckpt_path, class_to_idx):
-    set_stochastic_depth(model, drop_prob=0.2)
-    ema       = EMA(model, decay=0.995)
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.2)
-    optimizer = torch.optim.AdamW([
-        {'params': get_backbone_params(model), 'lr': 5e-5},
-        {'params': get_head_params(model),     'lr': 5e-4},
-    ], weight_decay=0.2)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=[5e-5, 5e-4],
-        steps_per_epoch=len(loader),
-        epochs=epochs,
-        pct_start=0.1,
-        div_factor=10,
-        final_div_factor=100
-    )
-    scaler = torch.amp.GradScaler(AUTOCAST_DEVICE, enabled=USE_CUDA)
-
-    print(f"\n{'='*50}\n  Training: {name}\n{'='*50}")
-    for epoch in range(epochs):
-        train_loss, train_acc = train_one_epoch(
-            model, loader, optimizer, scheduler, criterion, scaler, ema, epoch
-        )
-        print(f"  [{name}] Epoch {epoch+1:2d}/{epochs} | "
-              f"Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
-
-    torch.save({
-        "model_state_dict": ema.shadow.state_dict(),
-        "class_to_idx":     class_to_idx,
-        "architecture":     name,
-    }, ckpt_path)
-    print(f"  Saved -> {ckpt_path}")
-
 # -----------------------------
 # Main
 # -----------------------------
@@ -233,14 +169,48 @@ def main():
     EPOCHS     = 50
     BATCH_SIZE = 32
 
-    loader, class_to_idx = get_full_train_loader(train_dir, batch_size=BATCH_SIZE)
+    loader, class_to_idx = get_train_loader(train_dir, batch_size=BATCH_SIZE)
     num_classes = len(class_to_idx)
 
-    train_model("ConvNeXt-Tiny",    build_convnext(num_classes),    loader, EPOCHS, "ckpt_convnext.pt",  class_to_idx)
-    train_model("EfficientNetV2-S", build_efficientnet(num_classes), loader, EPOCHS, "ckpt_effnetv2s.pt", class_to_idx)
-    train_model("Swin-T",           build_swin(num_classes),         loader, EPOCHS, "ckpt_swint.pt",     class_to_idx)
+    model = build_model(num_classes)
+    set_stochastic_depth(model, drop_prob=0.2)
+    ema   = EMA(model, decay=0.995)
 
-    print("\nAll done. Run inference.py to generate submission.csv")
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.2)
+    optimizer = torch.optim.AdamW([
+        {'params': model.layers.parameters(),  'lr': 5e-5}, 
+        {'params': model.head.parameters(),    'lr': 5e-4}, 
+        {'params': model.patch_embed.parameters(), 'lr': 5e-5}, 
+        {'params': model.norm.parameters(),    'lr': 5e-5},  
+    ], weight_decay=0.2)
+
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=[5e-5, 5e-4, 5e-5, 5e-5],
+        steps_per_epoch=len(loader),
+        epochs=EPOCHS,
+        pct_start=0.1,
+        div_factor=10,
+        final_div_factor=100
+    )
+
+    scaler = torch.amp.GradScaler(AUTOCAST_DEVICE, enabled=USE_CUDA)
+
+    print(f"\n{'='*50}\n  Training: Swin-T\n{'='*50}")
+    for epoch in range(EPOCHS):
+        train_loss, train_acc = train_one_epoch(
+            model, loader, optimizer, scheduler, criterion, scaler, ema, epoch
+        )
+        print(f"  Epoch {epoch+1:2d}/{EPOCHS} | "
+              f"Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
+
+    torch.save({
+        "model_state_dict": ema.shadow.state_dict(),
+        "class_to_idx":     class_to_idx,
+        "architecture":     "swin_t",
+    }, "ckpt_swint.pt")
+    print("\nSaved -> ckpt_swint.pt")
+    print("Run inference.py to generate submission.csv")
 
 if __name__ == "__main__":
     main()
