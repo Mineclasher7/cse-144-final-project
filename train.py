@@ -181,11 +181,11 @@ def main():
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.2)
     optimizer = torch.optim.AdamW([
-        {'params': model.features.parameters(),  'lr': 5e-5},  # backbone
-        {'params': model.head.parameters(),    'lr': 5e-4},  # head
-        {'params': model.patch_embed.parameters(), 'lr': 5e-5},  # patch embedding
-        {'params': model.norm.parameters(),    'lr': 5e-5},  # final norm
+    {'params': model.features.parameters(), 'lr': 5e-5},   
+    {'params': model.head.parameters(),     'lr': 5e-4},   
+    {'params': model.norm.parameters(),     'lr': 5e-5},   
     ], weight_decay=0.2)
+
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
