@@ -7,118 +7,110 @@ from tqdm.auto import tqdm
 from torchvision import transforms, models
 from PIL import Image
 
-# -----------------------------
-# Device
-# -----------------------------
-device = (
-    torch.device("cuda") if torch.cuda.is_available()
-    else torch.device("mps") if torch.backends.mps.is_available()
-    else torch.device("cpu")
-)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_CUDA = torch.cuda.is_available()
-AUTOCAST_DEVICE = 'cuda' if USE_CUDA else 'cpu'
+AUTOCAST_DEVICE = "cuda" if USE_CUDA else "cpu"
+
 print(f"Inference on: {device}")
 
 # -----------------------------
-# Model Loader
+# Load Models
 # -----------------------------
-def load_model(ckpt_path, num_classes=100):
-    model = models.swin_t(weights=None)
-    in_feat = model.head.in_features
-    model.head = nn.Sequential(
-        nn.Dropout(p=0.0),
-        nn.Linear(in_feat, num_classes)
-    )
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.to(device).eval()
-    return model, ckpt["class_to_idx"]
+def load_convnext(path, num_classes):
+    m = models.convnext_tiny(weights=None)
+    in_f = m.classifier[2].in_features
+    m.classifier[2] = nn.Linear(in_f, num_classes)
+    ckpt = torch.load(path, map_location=device)
+    m.load_state_dict(ckpt["model_state_dict"])
+    return m.to(device).eval(), ckpt["class_to_idx"]
+
+def load_efficientnet(path, num_classes):
+    m = models.efficientnet_v2_s(weights=None)
+    in_f = m.classifier[1].in_features
+    m.classifier[1] = nn.Linear(in_f, num_classes)
+    ckpt = torch.load(path, map_location=device)
+    m.load_state_dict(ckpt["model_state_dict"])
+    return m.to(device).eval(), ckpt["class_to_idx"]
+
+def load_swin(path, num_classes):
+    m = models.swin_t(weights=None)
+    in_f = m.head.in_features
+    m.head = nn.Linear(in_f, num_classes)
+    ckpt = torch.load(path, map_location=device)
+    m.load_state_dict(ckpt["model_state_dict"])
+    return m.to(device).eval(), ckpt["class_to_idx"]
 
 # -----------------------------
-# TTA Inference
+# TTA
 # -----------------------------
 @torch.no_grad()
-def predict(model, test_root, n_rand=4):
+def tta(model, img):
     mean = [0.485, 0.456, 0.406]
     std  = [0.229, 0.224, 0.225]
     norm = transforms.Normalize(mean, std)
 
-    base_tf = transforms.Compose([
+    base = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
-        transforms.ToTensor(), norm,
+        transforms.ToTensor(), norm
     ])
-    hflip_tf = transforms.Compose([
+
+    flip = transforms.Compose([
         transforms.Resize(256),
         transforms.CenterCrop(224),
         transforms.RandomHorizontalFlip(p=1.0),
-        transforms.ToTensor(), norm,
+        transforms.ToTensor(), norm
     ])
-    five_crop_tf = transforms.Compose([
+
+    crops = transforms.Compose([
         transforms.Resize(256),
         transforms.FiveCrop(224),
-        transforms.Lambda(lambda crops: torch.stack([
-            norm(transforms.ToTensor()(c)) for c in crops
-        ])),
-    ])
-    rand_tf = transforms.Compose([
-        transforms.RandomResizedCrop(224, scale=(0.75, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(), norm,
+        transforms.Lambda(lambda c: torch.stack([norm(transforms.ToTensor()(x)) for x in c]))
     ])
 
-    files = sorted([
-        f for f in os.listdir(test_root)
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ])
+    views = []
+    views.append(base(img).unsqueeze(0))
+    views.append(flip(img).unsqueeze(0))
+    views.append(crops(img))
 
-    results = []
+    batch = torch.cat(views, dim=0).to(device)
 
-    for fname in tqdm(files, desc="TTA Inference"):
-        img_pil = Image.open(os.path.join(test_root, fname)).convert("RGB")
+    with torch.amp.autocast(AUTOCAST_DEVICE, enabled=USE_CUDA):
+        logits = model(batch)
 
-        views = []
-        views.append(base_tf(img_pil).unsqueeze(0))
-        views.append(hflip_tf(img_pil).unsqueeze(0))
-        views.append(five_crop_tf(img_pil))
-        for _ in range(n_rand):
-            views.append(rand_tf(img_pil).unsqueeze(0))
-
-        batch = torch.cat(views, dim=0).to(device)
-
-        with torch.amp.autocast(AUTOCAST_DEVICE, enabled=USE_CUDA):
-            logits = model(batch)
-
-        probs = F.softmax(logits, dim=1).mean(dim=0)
-        pred = probs.argmax().item()
-
-        results.append((fname, pred))
-
-    return results
+    return F.softmax(logits, dim=1).mean(dim=0)
 
 # -----------------------------
 # Main
 # -----------------------------
 def main():
-    test_dir  = "/content/drive/MyDrive/test"
-    ckpt_path = "ckpt_swint.pt"
+    test_dir = "/content/drive/MyDrive/test"
 
-    model, class_to_idx = load_model(ckpt_path, num_classes=100)
-    idx_to_class = {v: k for k, v in class_to_idx.items()}
+    conv, map1 = load_convnext("ckpt_convnext.pt", 100)
+    eff,  map2 = load_efficientnet("ckpt_efficientnet.pt", 100)
+    swin, map3 = load_swin("ckpt_swin.pt", 100)
 
-    results = predict(model, test_dir)
+    idx_to_class = {v: k for v, k in map1.items()}
 
-    # Build submission directly
-    df = pd.DataFrame({
-        "ID":   [fname for fname, _ in results],
-        "Label": [idx_to_class[pred] for _, pred in results]
-    })
+    files = sorted([f for f in os.listdir(test_dir) if f.endswith(".jpg")])
 
-    out_path = "/content/submission.csv"
-    df.to_csv(out_path, index=False)
+    results = []
 
-    print(f"Submission saved to: {out_path}")
-    print(df.head(10).to_string(index=False))
+    for fname in tqdm(files):
+        img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
+
+        p1 = tta(conv, img)
+        p2 = tta(eff, img)
+        p3 = tta(swin, img)
+
+        final = 0.55*p1 + 0.25*p2 + 0.20*p3
+        pred = final.argmax().item()
+
+        results.append((fname, idx_to_class[pred]))
+
+    df = pd.DataFrame(results, columns=["ID", "Label"])
+    df.to_csv("submission.csv", index=False)
+    print("Saved submission.csv")
 
 if __name__ == "__main__":
     main()
