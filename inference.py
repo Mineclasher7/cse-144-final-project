@@ -6,21 +6,6 @@ import pandas as pd
 from tqdm.auto import tqdm
 from torchvision import transforms, models
 from PIL import Image
-import subprocess
-from contextlib import contextmanager
-
-# -----------------------------
-# Caffeinate Context Manager
-# -----------------------------
-@contextmanager
-def caffeinate():
-    proc = subprocess.Popen(["caffeinate", "-dimsu"])
-    print("Caffeinate ON")
-    try:
-        yield
-    finally:
-        proc.terminate()
-        print("Caffeinate OFF")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_CUDA = torch.cuda.is_available()
@@ -101,37 +86,36 @@ def tta(model, img):
 def main():
     test_dir = "/content/drive/MyDrive/test"
 
-    with caffeinate():
-        # Load ConvNeXt FIRST and use its mapping
-        conv, class_to_idx = load_convnext("ckpt_convnext.pt", 100)
+    # Load ConvNeXt FIRST and use its mapping
+    conv, class_to_idx = load_convnext("ckpt_convnext.pt", 100)
 
-        # Load the other two models (ignore their mappings)
-        eff  = load_efficientnet("ckpt_efficientnet.pt", 100)
-        swin = load_swin("ckpt_swin.pt", 100)
+    # Load the other two models (ignore their mappings)
+    eff  = load_efficientnet("ckpt_efficientnet.pt", 100)
+    swin = load_swin("ckpt_swin.pt", 100)
 
-        # Build idx_to_class from ConvNeXt ONLY
-        idx_to_class = {v: k for k, v in class_to_idx.items()}
+    # Build idx_to_class from ConvNeXt ONLY
+    idx_to_class = {v: k for k, v in class_to_idx.items()}
 
-        files = sorted([f for f in os.listdir(test_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))])
+    files = sorted([f for f in os.listdir(test_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))])
 
-        results = []
+    results = []
 
-        for fname in tqdm(files):
-            img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
+    for fname in tqdm(files):
+        img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
 
-            p1 = tta(conv, img)
-            p2 = tta(eff, img)
-            p3 = tta(swin, img)
+        p1 = tta(conv, img)
+        p2 = tta(eff, img)
+        p3 = tta(swin, img)
 
-            # Weighted ensemble
-            final = 0.55*p1 + 0.25*p2 + 0.20*p3
-            pred = final.argmax().item()
+        # Weighted ensemble
+        final = 0.55*p1 + 0.25*p2 + 0.20*p3
+        pred = final.argmax().item()
 
-            results.append((fname, idx_to_class[pred]))
+        results.append((fname, idx_to_class[pred]))
 
-        df = pd.DataFrame(results, columns=["ID", "Label"])
-        df.to_csv("submission.csv", index=False)
-        print("Saved submission.csv")
+    df = pd.DataFrame(results, columns=["ID", "Label"])
+    df.to_csv("submission.csv", index=False)
+    print("Saved submission.csv")
 
 if __name__ == "__main__":
     main()
