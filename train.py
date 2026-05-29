@@ -189,7 +189,7 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=[5e-5, 5e-4, 5e-5, 5e-5],
+        max_lr=[5e-5, 5e-4, 5e-5],
         steps_per_epoch=len(loader),
         epochs=EPOCHS,
         pct_start=0.1,
