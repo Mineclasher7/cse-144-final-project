@@ -107,6 +107,8 @@ class EMA:
 
 # -----------------------------
 # Model — Swin-T
+# Shifted-window attention: best ViT-family model for small datasets
+# 28M params, 81.3% ImageNet, fine-tunes well with local+global features
 # -----------------------------
 def build_model(num_classes, dropout=0.4):
     model   = models.swin_t(weights=models.Swin_T_Weights.DEFAULT)
@@ -129,8 +131,9 @@ def train_one_epoch(model, loader, optimizer, scheduler, criterion, scaler, ema,
     model.train()
     total_loss, correct, total = 0, 0, 0
 
+    # Freeze backbone for first 2 epochs
     freeze = epoch < 2
-    for param in model.layers.parameters():
+    for param in model.features.parameters():
         param.requires_grad = not freeze
 
     for x, y in tqdm(loader, desc=f"  Epoch {epoch+1}", leave=False):
@@ -178,10 +181,10 @@ def main():
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.2)
     optimizer = torch.optim.AdamW([
-        {'params': model.layers.parameters(),  'lr': 5e-5}, 
-        {'params': model.head.parameters(),    'lr': 5e-4}, 
-        {'params': model.patch_embed.parameters(), 'lr': 5e-5}, 
-        {'params': model.norm.parameters(),    'lr': 5e-5},  
+        {'params': model.features.parameters(),  'lr': 5e-5},  # backbone
+        {'params': model.head.parameters(),    'lr': 5e-4},  # head
+        {'params': model.patch_embed.parameters(), 'lr': 5e-5},  # patch embedding
+        {'params': model.norm.parameters(),    'lr': 5e-5},  # final norm
     ], weight_decay=0.2)
 
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
