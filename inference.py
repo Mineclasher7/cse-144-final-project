@@ -6,6 +6,21 @@ import pandas as pd
 from tqdm.auto import tqdm
 from torchvision import transforms, models
 from PIL import Image
+import subprocess
+from contextlib import contextmanager
+
+# -----------------------------
+# Caffeinate Context Manager
+# -----------------------------
+@contextmanager
+def caffeinate():
+    proc = subprocess.Popen(["caffeinate", "-dimsu"])
+    print("Caffeinate ON")
+    try:
+        yield
+    finally:
+        proc.terminate()
+        print("Caffeinate OFF")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_CUDA = torch.cuda.is_available()
@@ -30,7 +45,7 @@ def load_efficientnet(path, num_classes):
     m.classifier[1] = nn.Linear(in_f, num_classes)
     ckpt = torch.load(path, map_location=device)
     m.load_state_dict(ckpt["model_state_dict"])
-    return m.to(device).eval(), ckpt["class_to_idx"]
+    return m.to(device).eval()
 
 def load_swin(path, num_classes):
     m = models.swin_t(weights=None)
@@ -38,7 +53,7 @@ def load_swin(path, num_classes):
     m.head = nn.Linear(in_f, num_classes)
     ckpt = torch.load(path, map_location=device)
     m.load_state_dict(ckpt["model_state_dict"])
-    return m.to(device).eval(), ckpt["class_to_idx"]
+    return m.to(device).eval()
 
 # -----------------------------
 # TTA
@@ -86,31 +101,37 @@ def tta(model, img):
 def main():
     test_dir = "/content/drive/MyDrive/test"
 
-    conv, map1 = load_convnext("ckpt_convnext.pt", 100)
-    eff,  map2 = load_efficientnet("ckpt_efficientnet.pt", 100)
-    swin, map3 = load_swin("ckpt_swin.pt", 100)
+    with caffeinate():
+        # Load ConvNeXt FIRST and use its mapping
+        conv, class_to_idx = load_convnext("ckpt_convnext.pt", 100)
 
-    idx_to_class = {v: k for v, k in map1.items()}
+        # Load the other two models (ignore their mappings)
+        eff  = load_efficientnet("ckpt_efficientnet.pt", 100)
+        swin = load_swin("ckpt_swin.pt", 100)
 
-    files = sorted([f for f in os.listdir(test_dir) if f.endswith(".jpg")])
+        # Build idx_to_class from ConvNeXt ONLY
+        idx_to_class = {v: k for k, v in class_to_idx.items()}
 
-    results = []
+        files = sorted([f for f in os.listdir(test_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))])
 
-    for fname in tqdm(files):
-        img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
+        results = []
 
-        p1 = tta(conv, img)
-        p2 = tta(eff, img)
-        p3 = tta(swin, img)
+        for fname in tqdm(files):
+            img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
 
-        final = 0.55*p1 + 0.25*p2 + 0.20*p3
-        pred = final.argmax().item()
+            p1 = tta(conv, img)
+            p2 = tta(eff, img)
+            p3 = tta(swin, img)
 
-        results.append((fname, idx_to_class[pred]))
+            # Weighted ensemble
+            final = 0.55*p1 + 0.25*p2 + 0.20*p3
+            pred = final.argmax().item()
 
-    df = pd.DataFrame(results, columns=["ID", "Label"])
-    df.to_csv("submission.csv", index=False)
-    print("Saved submission.csv")
+            results.append((fname, idx_to_class[pred]))
+
+        df = pd.DataFrame(results, columns=["ID", "Label"])
+        df.to_csv("submission.csv", index=False)
+        print("Saved submission.csv")
 
 if __name__ == "__main__":
     main()
