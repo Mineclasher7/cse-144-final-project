@@ -230,7 +230,7 @@ def train_model(name, model, loader, epochs, ckpt_path, class_to_idx):
 # -----------------------------
 def main():
     train_dir  = "/content/drive/MyDrive/train"
-    EPOCHS     = 60
+    EPOCHS     = 50
     BATCH_SIZE = 32
 
     loader, class_to_idx = get_full_train_loader(train_dir, batch_size=BATCH_SIZE)
