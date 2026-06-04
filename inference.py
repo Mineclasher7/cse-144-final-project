@@ -8,14 +8,18 @@ from transformers import SiglipVisionModel, AutoImageProcessor
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Inference on:", device)
 
-# Load backbone
-processor = AutoImageProcessor.from_pretrained("google/siglip2-base-patch16-224")
-backbone = SiglipVisionModel.from_pretrained("google/siglip2-base-patch16-224").to(device)
+# -----------------------------
+# Load checkpoint
+# -----------------------------
+ckpt = torch.load("siglip2_classifier.pt", map_location=device)
+class_names = ckpt["class_names"]
+model_name = ckpt.get("model_name", "google/siglip2-base-patch16-224")
+
+processor = AutoImageProcessor.from_pretrained(model_name)
+backbone = SiglipVisionModel.from_pretrained(model_name).to(device)
 backbone.eval()
 
-# Load classifier
-ckpt = torch.load("siglip_classifier.pt", map_location=device)
-class_names = ckpt["class_names"]
+embed_dim = backbone.config.hidden_size
 
 class Classifier(torch.nn.Module):
     def __init__(self, embed_dim, num_classes):
@@ -30,29 +34,36 @@ class Classifier(torch.nn.Module):
     def forward(self, x):
         return self.mlp(x)
 
-classifier = Classifier(backbone.config.hidden_size, len(class_names)).to(device)
-classifier.load_state_dict(ckpt["classifier"])
+classifier = Classifier(embed_dim, len(class_names)).to(device)
+classifier.load_state_dict(ckpt["classifier_state_dict"])
 classifier.eval()
 
-# Embedding helper
 @torch.no_grad()
-def get_emb(img):
+def get_embedding(img):
     inputs = processor(images=img, return_tensors="pt").to(device)
-    out = backbone(**inputs)
-    return out.pooler_output
+    outputs = backbone(pixel_values=inputs["pixel_values"])
+    return outputs.pooler_output  # (1, embed_dim)
 
-# Predict
-test_dir = "/content/drive/MyDrive/test"
-files = sorted([f for f in os.listdir(test_dir) if f.lower().endswith(("jpg","png","jpeg"))])
+def main():
+    test_dir = "/content/drive/MyDrive/test"
+    files = sorted(
+        f for f in os.listdir(test_dir)
+        if f.lower().endswith((".jpg", ".jpeg", ".png"))
+    )
 
-results = []
-for fname in tqdm(files, desc="Predicting"):
-    img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
-    emb = get_emb(img)
-    logits = classifier(emb)
-    pred = logits.argmax(1).item()
-    results.append((fname, class_names[pred]))
+    results = []
+    for fname in tqdm(files, desc="Predicting"):
+        img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
+        emb = get_embedding(img)
+        logits = classifier(emb)
+        pred = logits.argmax(1).item()
+        label = class_names[pred]
+        results.append((fname, label))
 
-df = pd.DataFrame(results, columns=["ID", "Label"])
-df.to_csv("submission.csv", index=False)
-print("Saved submission.csv")
+    df = pd.DataFrame(results, columns=["ID", "Label"])
+    df.to_csv("submission.csv", index=False)
+    print("Saved submission.csv")
+    print(df.head().to_string(index=False))
+
+if __name__ == "__main__":
+    main()
