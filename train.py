@@ -103,7 +103,7 @@ def get_embeddings(img_list):
 # -----------------------------
 def main():
     train_dir = "/content/drive/MyDrive/train"
-    EPOCHS = 30
+    EPOCHS = 35
     BATCH_SIZE = 32
 
     dataset = ImageDataset(train_dir)
