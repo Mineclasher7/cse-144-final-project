@@ -2,8 +2,8 @@
 
 This repository provides two scripts:
 
-- `train.py` — trains the ConvNeXt-Tiny model and saves `checkpoint.pt`
-- `inference.py` — loads the trained model and generates `sample_submission.csv`
+- `train.py` — trains the ConvNeXt-Tiny model and saves `siglip2_classifier.pt`
+- `inference.py` — loads the trained model and generates `submission.csv`
 
 Follow the steps below to run each stage.
 
@@ -49,7 +49,7 @@ Paths for the dataset are defined at the top of `train.py` and can be modified i
 
 ## Inference
 
-After `checkpoint.pt` has been created, run: 
+After `siglip2_classifier.pt` has been created, run: 
 
 ```bash
 python inference.py
@@ -60,7 +60,7 @@ The script will:
 - Load the trained model
 - Apply Test-Time Augmentation (center crop, flip, 5-crop)
 - Predict labels for all test images
-- Write predictions into `sample_submission.csv`
+- Write predictions into `submission.csv`
 
 The output file will follow the required format:
 
