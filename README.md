@@ -2,7 +2,7 @@
 
 This repository provides two scripts:
 
-- `train.py` — trains the ConvNeXt-Tiny model and saves `siglip2_classifier.pt`
+- `train.py` — trains a classifier head on top of SigLIP‑2 ViT and saves `siglip2_classifier.pt`
 - `inference.py` — loads the trained model and generates `submission.csv`
 
 Follow the steps below to run each stage.
@@ -11,7 +11,8 @@ Follow the steps below to run each stage.
 
 ## Training
 
-Make sure your directory structure looks like:
+
+With the dataset uploaded into google drive as follows:
 
 ```text
 MyDrive/
@@ -23,7 +24,6 @@ MyDrive/
         0.jpg
         1.jpg
         ...
-    sample_submission.csv  # provided template
 ```
 
 To start training, run: 
@@ -31,16 +31,15 @@ To start training, run:
 ```bash
 python train.py
 ```
-
 The script will:
-
-- Load the training and validation sets
-- Train ConvNeXt-Tiny with modern augmentations (RandAugment, Mixup, CutMix, RandomErasing)
-- Use OneCycleLR and EMA for improved performance
-- Save the best model to: 
+- Load the dataset and split it into 80% train / 20% validation
+- Extract embeddings using SigLIP‑2 ViT (google/siglip2-base-patch16-224)
+- Train a lightweight MLP classifier head
+- Track validation accuracy each epoch
+- Save the best-performing model to:
 
 ```bash
-checkpoint.pt
+siglip2_classifier.pt
 ```
 
 Paths for the dataset are defined at the top of `train.py` and can be modified if needed.
