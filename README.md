@@ -15,6 +15,13 @@ Below is our team’s position on the Kaggle public leaderboard:
 
 ![Kaggle Leaderboard Screenshot](images/leaderboard.png)
 
+## Model Weights
+
+The trained SigLIP‑2 classifier weights can be downloaded here:
+
+[Download Model Weights (Google Drive)](https://drive.google.com/file/d/1jymEvd4XyKUUUXySY_UgOCZC3fQZNk5w/view?usp=sharing)
+
+
 ---
 
 ## Training
