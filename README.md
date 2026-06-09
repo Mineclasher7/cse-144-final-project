@@ -9,6 +9,14 @@ Follow the steps below to run each stage.
 
 ---
 
+## Kaggle Leaderboard Position
+
+Below is our team’s position on the Kaggle public leaderboard:
+
+![Kaggle Leaderboard Screenshot](images/leaderboard.png)
+
+---
+
 ## Training
 
 
@@ -32,6 +40,7 @@ To start training, run:
 python train.py
 ```
 The script will:
+
 - Load the dataset and split it into 80% train / 20% validation
 - Extract embeddings using SigLIP‑2 ViT (google/siglip2-base-patch16-224)
 - Train a lightweight MLP classifier head
@@ -56,9 +65,9 @@ python inference.py
 
 The script will:
 
-- Load the trained model
-- Apply Test-Time Augmentation (center crop, flip, 5-crop)
-- Predict labels for all test images
+- Load the saved classifier and SigLIP‑2 backbone
+- Compute embeddings for each test image
+- Predict the most likely class
 - Write predictions into `submission.csv`
 
 The output file will follow the required format:
